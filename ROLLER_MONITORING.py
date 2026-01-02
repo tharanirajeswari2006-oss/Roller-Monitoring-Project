@@ -2,82 +2,112 @@ import cv2
 import time
 import numpy as np
 import winsound
+import smtplib
 
-# ---------------- PARAMETERS ----------------
+# ---------------- MAIL FUNCTION ----------------
+def send_alert_mail(zone_name):
+    sender = "yourmail@gmail.com"
+    password = "your_app_password"
+    receiver = "receiver@gmail.com"
+
+    message = f"""Subject: ROLLER STOP ALERT - {zone_name}
+
+Paint line in {zone_name} did not reappear within 8 seconds.
+Roller may have stopped.
+"""
+    server = smtplib.SMTP("smtp.gmail.com", 587)
+    server.starttls()
+    server.login(sender, password)
+    server.sendmail(sender, receiver, message)
+    server.quit()
+
+# ---------------- SETTINGS ----------------
+CAMERA_INDEX = 0
 TIME_LIMIT = 8  # seconds
-PAINT_PIXEL_THRESHOLD = 500
-alarm_active = False
+PAINT_MIN_PIXELS = 500
 
-# Paint color HSV (adjust if needed)
-LOWER_COLOR = np.array([20, 100, 100])
+LOWER_COLOR = np.array([20, 100, 100])  # adjust HSV for your paint
 UPPER_COLOR = np.array([30, 255, 255])
 
-# ---------------- CAMERA ----------------
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(CAMERA_INDEX)
+if not cap.isOpened():
+    print("Error: Could not open camera.")
+    exit()
 
-top_detect_time = None
-bottom_detected = False
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-print("🎥 Roller Monitoring Started | Press ESC to exit")
+# Split zones
+upper_zone = (0, 0, frame_width, frame_height // 2)  # x1,y1,x2,y2
+lower_zone = (0, frame_height // 2, frame_width, frame_height)
+
+# Initialize timers & alarm flags
+last_paint_upper = time.time()
+last_paint_lower = time.time()
+ALARM_UPPER = False
+ALARM_LOWER = False
+
+print("Monitoring started. Press ESC to exit.")
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    h, w, _ = frame.shape
-
-    # -------- Define TOP & BOTTOM zones --------
-    top_zone = frame[0:int(h*0.3), :]
-    bottom_zone = frame[int(h*0.7):h, :]
-
-    # Convert to HSV
-    hsv_top = cv2.cvtColor(top_zone, cv2.COLOR_BGR2HSV)
-    hsv_bottom = cv2.cvtColor(bottom_zone, cv2.COLOR_BGR2HSV)
-
-    mask_top = cv2.inRange(hsv_top, LOWER_COLOR, UPPER_COLOR)
-    mask_bottom = cv2.inRange(hsv_bottom, LOWER_COLOR, UPPER_COLOR)
-
-    top_pixels = cv2.countNonZero(mask_top)
-    bottom_pixels = cv2.countNonZero(mask_bottom)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
     current_time = time.time()
 
-    # -------- TOP paint detected --------
-    if top_pixels > PAINT_PIXEL_THRESHOLD:
-        top_detect_time = current_time
-        bottom_detected = False
-        alarm_active = False
+    # -------- Upper Zone --------
+    x1, y1, x2, y2 = upper_zone
+    upper_frame = frame[y1:y2, x1:x2]
+    mask_upper = cv2.inRange(cv2.cvtColor(upper_frame, cv2.COLOR_BGR2HSV), LOWER_COLOR, UPPER_COLOR)
+    paint_pixels_upper = cv2.countNonZero(mask_upper)
 
-    # -------- BOTTOM paint detected --------
-    if top_detect_time and bottom_pixels > PAINT_PIXEL_THRESHOLD:
-        bottom_detected = True
-        cv2.putText(frame, "ROLLER ROTATING", (40, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        top_detect_time = None
+    if paint_pixels_upper > PAINT_MIN_PIXELS:
+        last_paint_upper = current_time
+        if ALARM_UPPER:
+            print("✅ Upper Zone: Roller running again. Alarm reset.")
+            ALARM_UPPER = False
+        cv2.putText(frame, "Upper Zone: RUNNING", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+    else:
+        if current_time - last_paint_upper > TIME_LIMIT and not ALARM_UPPER:
+            cv2.putText(frame, "Upper Zone: STOPPED", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+            winsound.Beep(2000, 1000)
+            send_alert_mail("Upper Zone")
+            ALARM_UPPER = True
 
-    # -------- TIME CHECK --------
-    if top_detect_time and not bottom_detected:
-        elapsed = current_time - top_detect_time
+    # -------- Lower Zone --------
+    x1, y1, x2, y2 = lower_zone
+    lower_frame = frame[y1:y2, x1:x2]
+    mask_lower = cv2.inRange(cv2.cvtColor(lower_frame, cv2.COLOR_BGR2HSV), LOWER_COLOR, UPPER_COLOR)
+    paint_pixels_lower = cv2.countNonZero(mask_lower)
 
-        if elapsed > TIME_LIMIT:
-            cv2.putText(frame, "ROLLER NOT ROTATING", (40, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    if paint_pixels_lower > PAINT_MIN_PIXELS:
+        last_paint_lower = current_time
+        if ALARM_LOWER:
+            print("✅ Lower Zone: Roller running again. Alarm reset.")
+            ALARM_LOWER = False
+        cv2.putText(frame, "Lower Zone: RUNNING", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+    else:
+        if current_time - last_paint_lower > TIME_LIMIT and not ALARM_LOWER:
+            cv2.putText(frame, "Lower Zone: STOPPED", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+            winsound.Beep(2000, 1000)
+            send_alert_mail("Lower Zone")
+            ALARM_LOWER = True
 
-            if not alarm_active:
-                winsound.Beep(2000, 1000)
-                alarm_active = True
+    # Draw rectangles for zones
+    cv2.rectangle(frame, (upper_zone[0], upper_zone[1]), (upper_zone[2], upper_zone[3]), (0,255,0), 2)
+    cv2.rectangle(frame, (lower_zone[0], lower_zone[1]), (lower_zone[2], lower_zone[3]), (255,0,0), 2)
 
-    # -------- Draw Zones --------
-    cv2.rectangle(frame, (0, 0), (w, int(h*0.3)), (255, 0, 0), 2)
-    cv2.rectangle(frame, (0, int(h*0.7)), (w, h), (0, 0, 255), 2)
+    cv2.imshow("Roller Monitoring System", frame)
+    cv2.imshow("Upper Zone Mask", mask_upper)
+    cv2.imshow("Lower Zone Mask", mask_lower)
 
-    cv2.imshow("Roller Monitoring", frame)
-    cv2.imshow("Top Mask", mask_top)
-    cv2.imshow("Bottom Mask", mask_bottom)
-
-    if cv2.waitKey(1) & 0xFF == 27:
+    if cv2.waitKey(1) & 0xFF == 27:  # ESC to exit
         break
 
 cap.release()
 cv2.destroyAllWindows()
+
+
